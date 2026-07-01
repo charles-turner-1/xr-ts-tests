@@ -11,6 +11,6 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "xarray-ts": "^0.1.0"
+    "xarray-ts": "^0.1.5"
   }
 }
