@@ -1,0 +1,16 @@
+[workspace]
+authors = ["Charles Turner <charles.turner@anu.edu.au>"]
+channels = ["conda-forge"]
+name = "xr-ts-test"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+open-with-python = "python load_xr.py"
+
+[dependencies]
+xarray = ">=2026.4.0,<2027"
+zarr = ">=3.2.1,<4"
+fsspec = ">=2026.6.0,<2027"
+requests = ">=2.34.2,<3"
+aiohttp = ">=3.14.1,<4"
