@@ -1,0 +1,31 @@
+## This concerns https://github.com/charles-turner-1/xarray-ts/pull/20 — the unified `rename()`
+
+Companion to `reference-xr-rename.md`, which covered the *split* forms (`renameVars` / `renameDims` / the string-only `DataArray.rename`). This PR fills the two gaps that doc explicitly flagged as unimplemented: the combined **`Dataset.rename(name_dict)`** and the **mapping form of `DataArray.rename`**. Line numbers are landmarks from a local `~/xarray` checkout, not gospel (see the caveat at the end).
+
+**The combined `Dataset.rename` (vars *and* dims in one call)**
+- `xarray/core/dataset.py` — `Dataset.rename(self, name_dict=None, **names)` (~L4213) → `Dataset._rename(...)` → `_rename_all(name_dict, dims_dict)` (~L4197). The public method's job is purely *dispatch*: it takes one flat `{old: new}` mapping and decides, per key, whether that name is a variable, a dimension, or both, then feeds the right sub-maps to `_rename_all`.
+- The key-classification step is what we mirror. In xarray, `_rename` builds `name_dict` (things in `self._variables`/`self._coord_names`) and `dims_dict` (things in `self.dims`) from the single user mapping, and raises if a key is neither: `ValueError(f"cannot rename {k!r} because it is not a variable or dimension in this dataset")`. **Our `Dataset.rename` (`src/dataset.ts`) is a direct port of that dispatch loop:** `isVar = #vars.has(old)`, `isDim = #dimSizes.has(old)`, error if neither, otherwise add to `varRenames` and/or `dimRenames`, then delegate to the existing `#renamed(varRenames, dimRenames)` engine (the same engine `renameVars`/`renameDims` already use). No new rename machinery — just the classifier in front of it.
+- **A dimension coordinate lands in both maps.** A name like `time` (dim == variable name) is both a dim and a var, so it goes into `varRenames` *and* `dimRenames`. `#renamed` then renames the variable, remaps every variable's `dims`, moves the `#rootCoords` entry, and remaps `axesByDim` — so the renamed thing stays a dimension coordinate and `.sel()` keeps working. This is the same deliberate choice documented in `reference-xr-rename.md` for `renameDims`: we keep the dim coordinate aligned on purpose. Modern xarray's `_rename` emits a warning here (the `create_dim_coord` block, ~L4229: renaming a dim↔coord "does not create an index anymore"); we take the other side of that trade on purpose so the index-like `.sel()` path stays intact.
+
+**Duplicate-target / collision rejection — still free**
+- We add *no* new guards for `rename`. Because it funnels into `#renamed`, the existing checks fire: "cannot rename multiple variables/dimensions to X" (mirrors xarray `_rename_vars`'s `"conflicts"` ValueError) and "cannot rename to existing variable/dimension X" (mirrors `rename_dims`'s `if v in self.dims or v in self` reject). Swaps like `{x: "y", y: "x"}` are allowed because `#renamed` skips the existing-target check when the target is itself being renamed away — same as xarray.
+
+**`DataArray.rename` — the mapping form**
+- `xarray/core/dataarray.py` — `DataArray.rename(new_name_or_name_dict=None, **names)` (~L2565). Real xarray branches on the argument type: a *hashable* (string) sets `self.name`; a *mapping* renames the array's dims and/or coordinates (it delegates to a temporary dataset rename internally).
+- **Our overload matches that shape.** `rename("tas")` is unchanged (a lazy view with a new `.name`). `rename({old: new})` validates each key is a dim of the array (`variable.dims.includes(key)`) or a coord in the array's `#coords`, else throws `has no dimension or coordinate "<key>"`, then produces a new `variable` (dims relabeled, `.name` relabeled if it was a key) plus a fresh coords `Map` with keys and `coord.dims` remapped via the shared `renameCoord` helper. `#axes` is positional (aligned to `variable.dims`), so it is carried through untouched — the rename never disturbs the current selection.
+- **Scope boundary worth remembering when verifying:** a standalone `DataArray` only carries *its own* coord view (the map handed down from the parent Dataset). Renaming through the DataArray relabels that view; it does not (and can't) rewrite the parent Dataset. The Dataset is the source of truth for cross-variable coordinate identity — that's why `Dataset.rename` is the primary surface and the DataArray form is the convenience.
+
+**Shared helper move (no behavior change)**
+- `renameCoord(coord, name, dimRenames)` moved from a module-local function in `dataset.ts` into `coords.ts` and is now exported. It's the small pure-metadata transform (new name, `dims` remapped, `dates()` closure rebound so time coords keep working). Both `Dataset.#renamed` and `DataArray.rename` now import it — avoids a circular import between `dataset.ts` and `dataarray.ts`, since both already depend on `coords.ts`.
+
+**How to verify against real xarray**
+Spin up a Dataset with a dim coordinate (`time`), a plain dim without a coord, and a data var, then compare:
+- `ds.rename({time: "t"})` → dim `t`, coordinate `t`, data var dims start with `t`, and label/index selection on `t` still works. (In xarray, `ds.rename({"time": "t"})` keeps `t` as an indexed coordinate; note the deprecation-ish warning about indexes on some versions.)
+- `ds.rename({temperature: "tas", x: "lon"})` → one call renames a data var *and* a dimension; check `ds.data_vars`, `ds.dims`, and the data var's dims together.
+- `ds.rename({nope: "z"})` → `ValueError ... not a variable or dimension`.
+- `da = ds["temperature"]; da.rename({"x": "lon"})` → array dims/coords relabeled, selection on `lon` works, values still load. Confirm the parent `ds` is unchanged.
+- Metadata-only: in Python this is trivially lazy; in ours the guarantee is "no chunk reads", which the PR asserts with a store `get` spy.
+
+If you only read two things in xarray source, read `Dataset._rename` (the per-key var-vs-dim dispatch + the "not a variable or dimension" error we mirror) and `DataArray.rename` (the string-vs-mapping branch we mirror).
+
+Caveat, same as the other reference notes: xarray reshuffles internals between releases, so exact names/line numbers drift. `_rename`, `_rename_all`, `_rename_vars`, `rename_dims`, and `DataArray.rename` have been stable landmarks for a long time.
